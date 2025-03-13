@@ -1,9 +1,6 @@
 import torch
 import torch.nn.functional as F
 
-
-
-
 def _get_batch_logps(logits: torch.FloatTensor, labels: torch.LongTensor, average_log_prob: bool = False) -> torch.FloatTensor:
     """Compute the log probabilities of the given labels under the given logits.
 
@@ -30,22 +27,3 @@ def _get_batch_logps(logits: torch.FloatTensor, labels: torch.LongTensor, averag
         return (per_token_logps * loss_mask).sum(-1) / loss_mask.sum(-1)
     else:
         return (per_token_logps * loss_mask).sum(-1)
-
-def filter_logits_by_labels(logits, labels):
-    labels = labels[:, 1:].clone()
-    logits = logits[:, :-1, :]
-
-    batch_size, seq_num, vocab_size = logits.shape
-    selected_logits_list = []
-
-    for i in range(batch_size):
-        # 对每个样本创建布尔掩码
-        mask = (labels[i] != -100)
-        
-        # 使用掩码选择该样本对应的 logits 元素
-        sample_logits = logits[i][mask]  # 保持 batch 维度
-        
-        # 将结果添加到列表中
-        selected_logits_list.append(sample_logits)
-
-    return selected_logits_list

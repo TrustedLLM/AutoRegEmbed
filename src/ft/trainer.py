@@ -1,13 +1,10 @@
 from sentence_transformers import SentenceTransformer, models
-# from transformers.trainer import Trainer, seed_worker
-import sys
-sys.path.append('/etc/ssd1/dengjingcheng/compress2retriever')
 
 from transformers.trainer import *
 from transformers import AutoModel
 from torch.utils.data import DataLoader
 from peft import AutoPeftModel, PeftModel
-# import shutil
+
 from typing import *
 import os
 import torch.distributed as dist
@@ -40,7 +37,7 @@ def save_ckpt_for_sentence_transformers(
     model.save(os.path.join(ckpt_dir, 'sentence_transformer'))
     tokenizer.save_pretrained(os.path.join(ckpt_dir, 'sentence_transformer'))
 
-class BiTrainer(Trainer):
+class EmbeddingTrainer(Trainer):
 
     def __init__(self, *sargs, **kwargs):
         super().__init__(*sargs, **kwargs)
@@ -74,7 +71,7 @@ class BiTrainer(Trainer):
                         os.path.join(output_dir, 'lora_adapter')
                     )
                     model = model.merge_and_unload()
-                    # shutil.rmtree(os.path.join(output_dir, 'lora_adapter')) # 删除lora_adapter
+                    
                     model.save_pretrained(os.path.join(output_dir, 'hf'))
                     del model
             else:
@@ -84,14 +81,7 @@ class BiTrainer(Trainer):
             self.tokenizer.save_pretrained(os.path.join(output_dir, 'hf'))
 
 
-        # save the checkpoint for sentence-transformers library
-        # if self.is_world_process_zero():
-        #     save_ckpt_for_sentence_transformers(
-        #         output_dir,
-        #         self.tokenizer,
-        #         pooling_mode=self.model.sentence_pooling_method,
-        #         normalized=self.model.normalized
-        #     )
+        
 
     def compute_loss(self, model, inputs, return_outputs=False):
         """

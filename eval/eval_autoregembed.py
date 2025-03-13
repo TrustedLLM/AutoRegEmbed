@@ -1,12 +1,12 @@
 import os
-
-
 import sys
-
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+sys.path.append(parent_dir)
 import mteb
 from mteb import MTEB_MAIN_EN
 from sentence_transformers import SentenceTransformer, models
-from src.modeling.modeling_embedding import EmbeddingModel
+from src.modeling.modeling_autoregembed import AutoRegEmbed
 from transformers import AutoTokenizer, AutoModel, AutoConfig
 from tqdm import tqdm
 import json
@@ -20,9 +20,9 @@ from typing import *
 import argparse
 from collections import OrderedDict
 import datasets
-# datasets.disable_caching()
 
-# def get_tasks(split_id, n, fast=False):
+from peft import LoraConfig, get_peft_model, PeftModel, TaskType, prepare_model_for_kbit_training
+
 all_tasks = OrderedDict({
     "Classification": [
         "AmazonCounterfactualClassification",
@@ -156,23 +156,19 @@ class InstructedMultiprocessSentenceTransformerWrapper:
     def __init__(
         self,
         model_path, 
-        mp_size=8,
+        mp_size=1,
         field_template=True,
-        instructions=None,
         dtype='float16',
         max_length=512,
-        sentence_pooling_method=None,
-        normalized=None,
-        attention_method=None,
+        num_compress_token=1
     ):
         self.model_path = model_path
         self.mp_size = mp_size
         self.field_template = field_template
         self.dtype = dtype
         self.max_length = max_length
-        self.sentence_pooling_method = sentence_pooling_method
-        self.normalized = normalized
-        self.attention_method = attention_method
+        self.num_compress_token = num_compress_token
+        
         
         ctx = mp.get_context("spawn")
         self.input_queue = ctx.Queue()
@@ -188,20 +184,14 @@ class InstructedMultiprocessSentenceTransformerWrapper:
                     self.input_queue, 
                     self.output_queue,
                     self.max_length,
-                    self.normalized,
-                    self.sentence_pooling_method,
-                    self.attention_method
+                    self.num_compress_token
                 )
             )
             p.start()
             self.processes.append(p)
         
         self.init_timer()
-        self.instructions = instructions
-        if instructions is None:
-            self.instructions = None
-        else:
-            self.instructions = instructions
+        
             
 
     def close(self):
@@ -221,32 +211,23 @@ class InstructedMultiprocessSentenceTransformerWrapper:
 
     @staticmethod
     def _encode_per_process(
-        model_path,
+        model_path, 
         dtype,
         rank, 
         input_queue,
         output_queue,
         max_length,
-        normalized,
-        sentence_pooling_method,
-        attention_method
+        num_compress_token
     ):
         device = torch.device(f'cuda:{rank}')
-        # model = AutoModel.from_pretrained(model_path,torch_dtype=dtype).to(device)
+        
         if dtype == 'bfloat16':
-            if attention_method == 'causal':
-                model = EmbeddingModel(model_path,normalized = normalized,sentence_pooling_method=sentence_pooling_method,bf16=True).to(device)
-            else:
-                model = BiEmbeddingModel(model_path,normalized = normalized,sentence_pooling_method=sentence_pooling_method,bf16=True).to(device)
+            model = AutoRegEmbed(model_path,num_compress_token=num_compress_token).to(device)
         else:
-            if attention_method == 'causal':
-                model = EmbeddingModel(model_path, normalized = normalized,sentence_pooling_method=sentence_pooling_method, bf16=False).to(device)
-            else:
-                model = BiEmbeddingModel(model_path, normalized = normalized,sentence_pooling_method=sentence_pooling_method, bf16=False).to(device)
+            model = AutoRegEmbed(model_path,num_compress_token=num_compress_token, bf16=False).to(device)
         
         model.eval()
-        # tokenizer = AutoTokenizer.from_pretrained(model_path)
-        # tokenizer.pad_token = tokenizer.eos_token
+        
         model.tokenizer.max_length = max_length
 
         with torch.no_grad():
@@ -260,10 +241,14 @@ class InstructedMultiprocessSentenceTransformerWrapper:
                     max_length=model.tokenizer.max_length,
                     add_special_tokens=True
                 ).to(device)
-                embeddings = model.encode(
-                    sentence_encoding
-                ).cpu().float()
-                # embeddings = F.normalize(embeddings, dim=-1)
+                
+                embeddings,_ = model._compress(
+                    sentence_encoding['input_ids'],
+                    sentence_encoding['attention_mask']
+                )
+                embeddings = torch.mean(embeddings, dim=1).cpu().float()
+                embeddings = F.normalize(embeddings, dim=-1)
+                    
                 output_queue.put((batch_id, embeddings))
 
     def _encode(
@@ -300,35 +285,18 @@ class InstructedMultiprocessSentenceTransformerWrapper:
     ):
         if isinstance(sentences[0], dict):
             sentences = list(map(lambda d: '\n'.join([text for _, text in d.items()]).strip(), sentences))
-
-        if self.field_template:
-            
-            instruction = self.instructions[prompt_name]
-            if instruction['symmetry']:
-                # prompt_template = "{text}\n\nThe following text is semantically similar to this text:"
-                # prompt_template = "{text}The text with semantic similarity to this text is\n\n"
-                #temp1
-                # prompt_template = "This sentence: “ {text} ” means in one word: “"
-                prompt_template = "{text}\nThis sentence means in one word: “"
-                # prompt_template = instruction['prompt_template']
-                # prompt = f'Instruct: {instruction}\nQuery: '
-                sentences = list(map(lambda sentence: prompt_template.format(text=sentence), sentences))
-            else:
-                # prompt_template = instruction['prompt_template']['query']['next']
-                # prompt_template = "Web search query: {query}\n\nAnswer document:"
-                # prompt_template = "{query}The document that can answer this question is\n\n"
-                # template2
-                prompt_template = '''Query: "{query}". Use one word to represent the query in a retrieval task. The word is: “'''
-                sentences = list(map(lambda sentence: prompt_template.format(query=sentence), sentences))
-
+        
+        if self.field_template: 
+            prompt_template = "{text}\nThis sentence means in one word: “" 
+            sentences = list(map(lambda sentence: prompt_template.format(text=sentence), sentences))
 
         embeddings = self._encode(sentences, batch_size, show_progress_bar)
-
+        
         return embeddings
     
     encode_queries = encode
     
-    def encode_corpus(
+    def encode_corpus( ## ignore
         self, 
         sentences,
         prompt_name=None,
@@ -340,19 +308,9 @@ class InstructedMultiprocessSentenceTransformerWrapper:
         if isinstance(sentences[0], dict):
             sentences = list(map(lambda d: '\n'.join([text for _, text in d.items()]).strip(), sentences))
         if self.field_template:
-            instruction = self.instructions[prompt_name]
-            if instruction['symmetry']:
-                # prompt_template = instruction['prompt_template']
-                # prompt_template = "{text}\n\nThe following text is semantically similar to this text:"
-                prompt_template = "{text}\nThis sentence means in one word: “"
-                # prompt = f'Instruct: {instruction}\nQuery: '
-                sentences = list(map(lambda sentence: prompt_template.format(text=sentence), sentences))
-            else:
-                # prompt_template = instruction['prompt_template']['document']['self']
-                # prompt_template = "{document}\n\nBelow is a paraphrase of this document:"
-                # template2
-                prompt_template = '''Passage: "{document}". Use one word to represent the passage in a retrieval task. The word is: “'''
-                sentences = list(map(lambda sentence: prompt_template.format(document=sentence), sentences))
+            
+            prompt_template = '''Passage: "{document}". Use one word to represent the passage in a retrieval task. The word is: “'''
+            sentences = list(map(lambda sentence: prompt_template.format(document=sentence), sentences))
 
         embeddings = self._encode(sentences, batch_size, show_progress_bar)        
         
@@ -361,9 +319,7 @@ class InstructedMultiprocessSentenceTransformerWrapper:
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_path', type=str, required=True)
-    parser.add_argument('--attention_method', type=str, required=True)
     parser.add_argument('--save_path', type=str, default=None)
-    parser.add_argument('--instruction_file', type=str, default='/etc/ssd1/dengjingcheng/baai_embedding_tune/script/mteb.json')
     parser.add_argument('--field_template', action='store_true')
     parser.add_argument('--mp_size', type=int, default=8)
     parser.add_argument('--batch_size', type=int, default=32)
@@ -374,10 +330,8 @@ if __name__ == '__main__':
     parser.add_argument('--dtype', type=str, required=True, choices=['float32', 'float16', 'bfloat16'])
     parser.add_argument('--task_type', type=str, default='all')
     parser.add_argument('--max_length', type=int, default=512)
-    parser.add_argument('--sentence_pooling_method', type=str, default='lasttoken')
-    parser.add_argument('--normalized', action='store_true')
+    parser.add_argument('--num_compress_token', type=int, default=1)
     
-    # parser.add_argument('--left', action='store_true')sentence_pooling_method,normalized,
     args = parser.parse_args()
     if args.save_path is None:
         args.save_path = os.path.join(args.model_path, 'mteb_results')
@@ -385,8 +339,7 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.ERROR)
     logger = logging.getLogger("main")
 
-    with open(args.instruction_file, 'r') as f:
-        instructions = json.load(f)
+        
 
     if args.dataset is None:
         all_datasets, total_size = get_datasets(
@@ -406,10 +359,7 @@ if __name__ == '__main__':
         mp_size=args.mp_size,
         field_template=args.field_template,
         max_length=args.max_length,
-        instructions=instructions,
-        sentence_pooling_method=args.sentence_pooling_method,
-        normalized=args.normalized,
-        attention_method = args.attention_method
+        num_compress_token = args.num_compress_token
     )
     start = time.time()
     # MTEB_MAIN_EN.tasks
@@ -435,3 +385,4 @@ if __name__ == '__main__':
             print(e)
             continue
     model.close()
+    
