@@ -15,9 +15,7 @@ import math
 from itertools import chain
 
 def ensure_list(obj):
-
     if not isinstance(obj, list):
-
         obj = [obj]
     return obj
 
