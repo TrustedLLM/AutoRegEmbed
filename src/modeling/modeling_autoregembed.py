@@ -65,7 +65,8 @@ class InformationCompressModel(nn.Module):
             self.tokenizer.add_special_tokens(special_tokens_dict)
             self.model.resize_token_embeddings(len(self.tokenizer))
         
-        self.embed_token_ids = [self.model.config.vocab_size - num_compress_token + i for i in range(num_compress_token)]
+        self.embed_token_ids = self.tokenizer.convert_tokens_to_ids(self.embed_tokens)
+
         
         self.lora_tune = lora_tune
         self.save_path = save_path
@@ -240,7 +241,8 @@ class ConditionDistributionAlignmentModel(nn.Module):
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, use_fast=False, trust_remote_code=True)
         self.embed_tokens =  [f'<EMBED{i}>' for i in range(num_compress_token)]      
         
-        self.embed_token_ids = [self.model.config.vocab_size - num_compress_token + i for i in range(num_compress_token)]
+        self.embed_token_ids = self.tokenizer.convert_tokens_to_ids(self.embed_tokens)
+
         
         
         self.save_path = save_path
@@ -441,7 +443,8 @@ class AutoRegEmbed(nn.Module):
         self.embed_tokens =  [f'<EMBED{i}>' for i in range(num_compress_token)]   
         
 
-        self.embed_token_ids = [self.model.config.vocab_size - num_compress_token + i for i in range(num_compress_token)]
+        self.embed_token_ids = self.tokenizer.convert_tokens_to_ids(self.embed_tokens)
+
 
         self.cross_entropy = nn.CrossEntropyLoss(reduction='mean')
         self.config = self.model.config
